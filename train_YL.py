@@ -50,6 +50,13 @@ def bboxes_iou(bboxes_a, bboxes_b, xyxy=True):
         br = torch.min(bboxes_a[:, None, 2:], bboxes_b[:, 2:])
         area_a = torch.prod(bboxes_a[:, 2:] - bboxes_a[:, :2], 1)
         area_b = torch.prod(bboxes_b[:, 2:] - bboxes_b[:, :2], 1)
+        # when n=3
+        # tl.shape -> torch.Size([3, 9, 2])
+        # bboxes_a.shape ->  torch.Size([3, 4])
+        # bboxes_b.shape -> torch.Size([9, 4])
+        # br.shape -> torch.Size([3, 9, 2])
+        # area_a.shape -> torch.Size([3])
+        # area_b.shape -> torch.Size([9])
     else:
         tl = torch.max((bboxes_a[:, None, :2] - bboxes_a[:, None, 2:] / 2),
                        (bboxes_b[:, :2] - bboxes_b[:, 2:] / 2))
@@ -93,14 +100,21 @@ class Yolo_loss(nn.Module):
 
         for i in range(3):
             all_anchors_grid = [(w / self.strides[i], h / self.strides[i]) for w, h in self.anchors]
-            ''' when i=0
+            '''self.strides = [8, 16, 32]
+            when i=0
             all_anchors_grid -> [(1.5, 2.0), (2.375, 4.5), (5.0, 3.5), (4.5, 9.375), (9.5, 6.875), (9.0, 18.25), (17.75, 13.75), (24.0, 30.375), (57.375, 50.125)]
+            when i=1
+             all_anchors_grid -> [(0.75, 1.0), (1.1875, 2.25), (2.5, 1.75), (2.25, 4.6875), (4.75, 3.4375), (4.5, 9.125), (8.875, 6.875), (12.0, 15.1875), (28.6875, 25.0625)]
             '''
             masked_anchors = np.array([all_anchors_grid[j] for j in self.anch_masks[i]], dtype=np.float32)
             ''' when i=0
             masked_anchors   -> array([[1.5  , 2.   ],
                                        [2.375, 4.5  ],
                                        [5.   , 3.5  ]], dtype=float32)
+            when i=1                     
+            masked_anchors  ->  array([[2.25  , 4.6875],
+                                       [4.75  , 3.4375],
+                                       [4.5   , 9.125 ]], dtype=float32)
             '''
             ref_anchors = np.zeros((len(all_anchors_grid), 4), dtype=np.float32)
             ref_anchors[:, 2:] = np.array(all_anchors_grid, dtype=np.float32)
@@ -123,6 +137,7 @@ class Yolo_loss(nn.Module):
             # (when x=any)  grid_x[x,x,x,:]-> tensor([ 0.,  1.,  2., ..., 73., 74., 75.], device='cuda:0')
             grid_y = torch.arange(fsize, dtype=torch.float).repeat(batch, 3, fsize, 1).permute(0, 1, 3, 2).to(device)
             '''
+            when i=0, batch=4,anchors=3 grid_y.size() -> torch.Size([4, 3, 76, 76])
             (when x=any) 
             grid_y[x,x,...] ->  tensor([[ 0.,  0.,  0.,  ...,  0.,  0.,  0.],
                                         [ 1.,  1.,  1.,  ...,  1.,  1.,  1.],
@@ -135,7 +150,7 @@ class Yolo_loss(nn.Module):
             anchor_w = torch.from_numpy(masked_anchors[:, 0]).repeat(batch, fsize, fsize, 1).permute(0, 3, 1, 2).to(
                 device)
             '''
-             anchor_w.size() -> torch.Size([4, 3, 76, 76])  4 is the batch size
+             anchor_w.size() -> torch.Size([4, 3, 76, 76])  4 is the batch size, anchors=3 
              when x = one of (0,1,2,3)
              anchor_w[x]   ->   tensor([[[1.5000, 1.5000, 1.5000,  ..., 1.5000, 1.5000, 1.5000],
                                          [1.5000, 1.5000, 1.5000,  ..., 1.5000, 1.5000, 1.5000],
@@ -213,7 +228,7 @@ class Yolo_loss(nn.Module):
 
         truth_x_all = (labels[:, :, 2] + labels[:, :, 0]) / (self.strides[output_id] * 2)
         truth_y_all = (labels[:, :, 3] + labels[:, :, 1]) / (self.strides[output_id] * 2)
-        truth_w_all = (labels[:, :, 2] - labels[:, :, 0]) / self.strides[output_id]
+        truth_w_all = (labels[:, :, 2] - labels[:, :, 0]) / self.strides[output_id]     # the width relates to strides
         truth_h_all = (labels[:, :, 3] - labels[:, :, 1]) / self.strides[output_id]
         truth_i_all = truth_x_all.to(torch.int16).cpu().numpy()
         truth_j_all = truth_y_all.to(torch.int16).cpu().numpy()
@@ -230,7 +245,12 @@ class Yolo_loss(nn.Module):
 
             # calculate iou between truth and reference anchors
             anchor_ious_all = bboxes_iou(truth_box.cpu(), self.ref_anchors[output_id])
+            # truth_box.shape -> torch.Size([n, 4])
+            # self.ref_anchors[output_id].size() -> torch.Size([9, 4])
+            # anchor_ious_all.shape -> torch.Size([3, 9]) n=3
             best_n_all = anchor_ious_all.argmax(dim=1)
+            # best_n_all.shape -> torch.Size([3]) (n=3) select the best anchor relates to 3 labels
+
             best_n = best_n_all % 3
             best_n_mask = ((best_n_all == self.anch_masks[output_id][0]) |
                            (best_n_all == self.anch_masks[output_id][1]) |
@@ -268,7 +288,7 @@ class Yolo_loss(nn.Module):
 
     def forward(self, xin, labels=None):
         loss, loss_xy, loss_wh, loss_obj, loss_cls, loss_l2 = 0, 0, 0, 0, 0, 0
-        for output_id, output in enumerate(xin):    # xin is a list of length 3, 3 scales of prediction
+        for output_id, output in enumerate(xin):    # xin is a list of length 3,  (3 scales of prediction)
             batchsize = output.shape[0]
             fsize = output.shape[2]     # feature size
             n_ch = 5 + self.n_classes   # x y w h+confidence+n class
@@ -280,10 +300,10 @@ class Yolo_loss(nn.Module):
             output[..., np.r_[:2, 4:n_ch]] = torch.sigmoid(output[..., np.r_[:2, 4:n_ch]])
 
             pred = output[..., :4].clone()
-            pred[..., 0] += self.grid_x[output_id]
-            pred[..., 1] += self.grid_y[output_id]
-            pred[..., 2] = torch.exp(pred[..., 2]) * self.anchor_w[output_id]
-            pred[..., 3] = torch.exp(pred[..., 3]) * self.anchor_h[output_id]
+            pred[..., 0] += self.grid_x[output_id]      # local x to global x
+            pred[..., 1] += self.grid_y[output_id]      # local yx to global y
+            pred[..., 2] = torch.exp(pred[..., 2]) * self.anchor_w[output_id]   #
+            pred[..., 3] = torch.exp(pred[..., 3]) * self.anchor_h[output_id]   #
 
             obj_mask, tgt_mask, tgt_scale, target = self.build_target(pred, labels, batchsize, fsize, n_ch, output_id)
 
