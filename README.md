@@ -1,6 +1,7 @@
 # 基于Tianxiaomo/pytorch-YOLOv4
 https://github.com/Tianxiaomo/pytorch-YOLOv4
-添加损失函数等注释
+
+yolo v4添加注释 包含正负样本生成、损失函数
 
 
 ## 所需环境
