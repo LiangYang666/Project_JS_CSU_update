@@ -1,4 +1,7 @@
-# Project JS 20200818 CSU
+# 基于Tianxiaomo/pytorch-YOLOv4
+https://github.com/Tianxiaomo/pytorch-YOLOv4
+添加损失函数等注释
+
 
 ## 所需环境
 ### requirement.txt
