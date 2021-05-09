@@ -217,6 +217,8 @@ class Yolo_loss(nn.Module):
             self.anchor_h.append(anchor_h)
 
     def build_target(self, pred, labels, batchsize, fsize, n_ch, output_id):
+        # pred.shape -> torch.Size([4, 3, 19, 19, 4])   # the first 4 is batch size, 3 is anchor number
+                                                        # 19 is feture size, the last 4 is x y w h
         # target assignment
         tgt_mask = torch.zeros(batchsize, self.n_anchors, fsize, fsize, 4 + self.n_classes).to(device=self.device)
         obj_mask = torch.ones(batchsize, self.n_anchors, fsize, fsize).to(device=self.device)
@@ -232,6 +234,7 @@ class Yolo_loss(nn.Module):
         truth_h_all = (labels[:, :, 3] - labels[:, :, 1]) / self.strides[output_id]
         truth_i_all = truth_x_all.to(torch.int16).cpu().numpy()
         truth_j_all = truth_y_all.to(torch.int16).cpu().numpy()
+        # truth_x(y w h)_all.shape -> torch.Size([4, 60])       # 4 is batch size, 60 is maximum number of labels
 
         for b in range(batchsize):
             n = int(nlabel[b])
@@ -240,8 +243,8 @@ class Yolo_loss(nn.Module):
             truth_box = torch.zeros(n, 4).to(self.device)
             truth_box[:n, 2] = truth_w_all[b, :n]
             truth_box[:n, 3] = truth_h_all[b, :n]
-            truth_i = truth_i_all[b, :n]    # the grid in i(th) column
-            truth_j = truth_j_all[b, :n]    # the grid in j(th) row
+            truth_i = truth_i_all[b, :n]    # central x is in the grid of i(th) column
+            truth_j = truth_j_all[b, :n]    # central x is in the grid of j(th) row
 
             # calculate iou between truth and reference anchors
             anchor_ious_all = bboxes_iou(truth_box.cpu(), self.ref_anchors[output_id])
@@ -250,40 +253,68 @@ class Yolo_loss(nn.Module):
             # anchor_ious_all.shape -> torch.Size([3, 9]) n=3
             best_n_all = anchor_ious_all.argmax(dim=1)
             # best_n_all.shape -> torch.Size([3]) (n=3) select the best anchor relates to 3 labels
-
             best_n = best_n_all % 3
+            '''for example:
+            best_n_all -> tensor([6, 4, 6])
+            best_n -> tensor([0, 1, 0])
+            when output_id = 0
+            best_n_mask -> tensor([False, False, False])
+            when output_id = 2
+            best_n_mask -> tensor([ True, False,  True]
+            '''
             best_n_mask = ((best_n_all == self.anch_masks[output_id][0]) |
                            (best_n_all == self.anch_masks[output_id][1]) |
                            (best_n_all == self.anch_masks[output_id][2]))
 
             if sum(best_n_mask) == 0:
+                # If the best anchor corresponding to the three labels is not in the predicted anchor of the output_id
                 continue
 
-            truth_box[:n, 0] = truth_x_all[b, :n]
+            truth_box[:n, 0] = truth_x_all[b, :n]   # central x
             truth_box[:n, 1] = truth_y_all[b, :n]
 
             pred_ious = bboxes_iou(pred[b].view(-1, 4), truth_box, xyxy=False)
             pred_best_iou, _ = pred_ious.max(dim=1)
+            '''
+            when output_id=2 n_labels=3     3 is not the number of anchors but labels 
+                pred[b].view(-1, 4).shape -> torch.Size([1083, 4])
+                pred[b].shape -> torch.Size([3, 19, 19, 4])
+                truth_box.shape -> torch.Size([3, 4])
+                pred_ious.shape -> torch.Size([1083, 3])
+                pred_best_iou.shape -> torch.Size([1083])  3*19*19=1083
+            '''
             pred_best_iou = (pred_best_iou > self.ignore_thre)
             pred_best_iou = pred_best_iou.view(pred[b].shape[:3])
+            '''    
+            when output_id=2 pred_best_iou.shape -> torch.Size([3, 19, 19])   # this 3 is the number of anchors
+            pred_best_iou:  The IOU of predicted boxes obtained by the anchor of each grid and the boxes in 
+                            the labels greater than 0.5 are marked as 1. 
+                        So the shape is [3, 19, 19] , 3 is the number of anchors, 19 is feature size
+            '''
             # set mask to zero (ignore) if pred matches truth
             obj_mask[b] = ~ pred_best_iou
 
-            for ti in range(best_n.shape[0]):
-                if best_n_mask[ti] == 1:
-                    i, j = truth_i[ti], truth_j[ti]
-                    a = best_n[ti]
+            for ti in range(best_n.shape[0]):   # n labels , so ti is the index of label
+                if best_n_mask[ti] == 1:    # if the best anchor of this label is this anchor of this output_id
+                    i, j = truth_i[ti], truth_j[ti]    # the grid in Column i, row j
+                    a = best_n[ti]  # a is the index of the anchor
                     obj_mask[b, a, j, i] = 1
-                    tgt_mask[b, a, j, i, :] = 1
+                    '''   
+                    obj_mask:   if the iou of predicted boxes obtained by the anchor of the grid and labels' boxes 
+                                greater than 0.5 but the central point of predicted boxes is not in the grid of labels' central 
+                                point, it keep to zero, it will be ignored  during training 
+                    '''
+                    tgt_mask[b, a, j, i, :] = 1     # if there is a true box's central point in the anchor of the grid
                     target[b, a, j, i, 0] = truth_x_all[b, ti] - truth_x_all[b, ti].to(torch.int16).to(torch.float)
                     target[b, a, j, i, 1] = truth_y_all[b, ti] - truth_y_all[b, ti].to(torch.int16).to(torch.float)
                     target[b, a, j, i, 2] = torch.log(
                         truth_w_all[b, ti] / torch.Tensor(self.masked_anchors[output_id])[best_n[ti], 0] + 1e-16)
                     target[b, a, j, i, 3] = torch.log(
                         truth_h_all[b, ti] / torch.Tensor(self.masked_anchors[output_id])[best_n[ti], 1] + 1e-16)
-                    target[b, a, j, i, 4] = 1
-                    target[b, a, j, i, 5 + labels[b, ti, 4].to(torch.int16).cpu().numpy()] = 1
+                    target[b, a, j, i, 4] = 1   # obj
+                    target[b, a, j, i, 5 + labels[b, ti, 4].to(torch.int16).cpu().numpy()] = 1  # class
                     tgt_scale[b, a, j, i, :] = torch.sqrt(2 - truth_w_all[b, ti] * truth_h_all[b, ti] / fsize / fsize)
+                    # tgt_scale, It represents the proportion of its size to the feature graph
         return obj_mask, tgt_mask, tgt_scale, target
 
     def forward(self, xin, labels=None):
